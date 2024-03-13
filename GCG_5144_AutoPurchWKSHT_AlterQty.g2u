@@ -1,0 +1,347 @@
+Program.Sub.Preflight.Start
+V.Global.sBITable.Declare(String,"dtBI_AUTO_PRCH_WS")
+V.Global.sInvConv.Declare(String,"dtInventoryConversion")
+V.Global.sWOConv.Declare(String,"dtWOConversion")
+V.Global.sPOLines.Declare(String,"dtPOLines")
+V.Global.sJobOp.Declare(String,"dtJobOp")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Author: Bix
+'Customer: McClung Energy Services, LLC
+'Date: 7/31/2018
+'GCG_5144_AutoPurchWKSHT_AlterQty.g2u
+'Report for Auto Purchasing Worksheet with advanced logic on Inventory Qty on hand, Qty devoted to WOs, and Qty on POs
+V.Local.sError.Declare(String)
+F.Intrinsic.Control.Try
+
+F.Intrinsic.Control.If(V.Caller.Hook,=,16947)
+'Check BI_AUTO_PRCH_WS and make corrections. run report after saving data
+	F.Intrinsic.Control.CallSub(GetBIData,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+	F.Intrinsic.Control.CallSub(CheckDTValues,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+	F.Intrinsic.Control.CallSub(WriteBIData,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+	F.Intrinsic.Control.CallSub(RunBIReport,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+	F.Intrinsic.Control.CallSub
+F.Intrinsic.Control.ElseIf(V.Caller.Hook,=,45410)
+'Open BDF and cross reference against BI_AUTO_PRCH_WS
+	F.Intrinsic.Control.CallSub(GetBIData,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+	F.Intrinsic.Control.CallSub(OpenAndEditBDF,"sOtherSubroutine",V.Ambient.CurrentSubroutine)
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {2}{1}Error Occurred {3} with description {4}{1}{1}GAB Version: {5}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.Main.End
+
+Program.Sub.OpenConnection.Start
+V.Local.sError.Declare(String)
+F.Intrinsic.Control.Try
+F.ODBC.Connection!con.OpenCompanyConnection
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.OpenConnection.End
+
+Program.Sub.CloseConnection.Start
+V.Local.sError.Declare(String)
+F.Intrinsic.Control.Try
+F.ODBC.Connection!con.Close
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.CloseConnection.End
+
+Program.Sub.GetBIData.Start
+'Create a DT of the BI data filled in to the Auto Purchsing Worksheet DB table
+V.Local..BulkDeclareString(sError,sCurrentSubroutine,sSQL)
+F.Intrinsic.String.Build("{0}->{1}",V.Args.sOtherSubroutine,V.Ambient.CurrentSubroutine,V.Local.sCurrentSubroutine)
+F.Intrinsic.Control.Try
+
+F.Intrinsic.Control.CallSub(OpenConnection,"sOtherSubroutine",V.Local.sCurrentSubroutine)
+F.Intrinsic.String.Build("select * from BI_AUTO_PRCH_WS where TRMNL = '{0}' and RPTID = '002820' order by SEQUENCE desc;",V.Caller.Terminal,V.Local.sSQL)
+F.Data.DataTable.CreateFromSQL(V.Global.sBITable,"con",V.Local.sSQL,True)
+F.Data.DataTable.CreateFromSQL(V.Global.sInvConv,"con","select PART, LOCATION as LOC, FACTOR_CONVERSION from V_INVENTORY_MSTR;",True)
+F.Data.DataTable.CreateFromSQL(V.Global.sWOConv,"con","select PART, LOCATION as LOC, CONSUMP_CONV from V_INVENTORY_MST3;",True)
+F.Data.DataTable.CreateFromSQL(V.Global.sPOLines,"con","select PART, LOCATION as LOC, DATE_DUE_LINE, QTY_ORDER - QTY_RECEIVED as QTY from V_PO_LINES;",True)
+F.Data.DataTable.CreateFromSQL(V.Global.sJobOp,"con","select PART, JOB, SUFFIX, SEQ, HOURS_ESTIMATED - HOURS_ACTUAL as QTY_REQ, DATE_DUE from V_JOB_OPERATIONS where LMO = 'M' and HOURS_ESTIMATED > HOURS_ACTUAL;",True)
+F.Intrinsic.Control.CallSub(CloseConnection,"sOtherSubroutine",V.Local.sCurrentSubroutine)
+
+'Defaulting the conversion factor to 1 instead of zero will have no effect on the PO Qty when they are multiplied
+F.Data.DataTable.AddExpressionColumn(V.Global.sInvConv,"CONV","Float","IIF(FACTOR_CONVERSION = 0,1,FACTOR_CONVERSION)")
+F.Data.DataTable.AddExpressionColumn(V.Global.sWOConv,"CONV","Float","IIF(CONSUMP_CONV = 0,1,CONSUMP_CONV)")
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.GetBIData.End
+
+Program.Sub.CheckDTValues.Start
+V.Local..BulkDeclareString(sError,sCurrentSubroutine,sFilter,sPart,sLoc,sSeqNum,sJob,sSfx,sSeq)
+V.Local..BulkDeclareLong(iCnt,iPT,iSeqCnt,iSeqNum,iPO,iDays,iJobOp,iConv,iOrigSize,iDiffSize)
+V.Local..BulkDeclareFloat(fQtyOH,fQtyOO,fPOQty,fFactConv,fInvQty,fWOConv,fQty,fWOQty)
+V.Local..BulkDeclareDate(dDate,dWODate)
+'Need to use this boolean to turn on when the first L2 line is accessed and the Part is scanned all the way to its PT line so that no scans will start at L2 lines between the two
+V.Local.bGettoPT.Declare(Boolean,False)
+F.Intrinsic.String.Build("{0}->{1}",V.Args.sOtherSubroutine,V.Ambient.CurrentSubroutine,V.Local.sCurrentSubroutine)
+F.Intrinsic.Control.Try
+
+V.Local.iSeqCnt.Set(0)
+F.Intrinsic.Control.For(V.Local.iCnt,V.DataTable.[V.Global.sBITable].RowCount--,0,-1)
+	F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iCnt).RowState,!=,8)
+		F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iCnt).REC_TYPE!FieldVal,=,"L2","and",V.DataTable.[V.Global.sBITable](V.Local.iCnt).SORT_VALUE!FieldValTrim,=,"^^^^^^^^^^",V.Local.bGettoPT,=,False)
+		'Reaching here means that you are at a new part so get information about the part
+			V.Local.sPart.Set(V.DataTable.[V.Global.sBITable](V.Local.iCnt).PART!FieldValTrim)
+			V.Local.sLoc.Set(V.DataTable.[V.Global.sBITable](V.Local.iCnt).LOCN!FieldValTrim)
+			'look for the 'PT' line in the DT for the part to get info on the Qty on hand and on order
+			F.Intrinsic.String.Build("PART = '{0}' and LOCN = '{1}' and REC_TYPE = 'PT'",V.Local.sPart,V.Local.sLoc,V.Local.sFilter)
+			F.Data.DataTable.Select(V.Global.sBITable,V.Local.sFilter,V.Local.iPT)
+			V.Local.fQtyOH.Set(V.DataTable.[V.Global.sBITable](V.Local.iPT).T_ONHAND!FieldVal)
+			'Create dataview of the INVENTORY_MSTR table to get its factor conversion from Inventory to Purchased qty so we can convert the POQty and compare it to the Qty on hand and on order
+			F.Intrinsic.String.Build("PART = '{0}' and LOC = '{1}'",V.Local.sPart,V.Local.sLoc,V.Local.sFilter)
+			F.Data.DataView.Create(V.Global.sInvConv,"dvFactorConv",22,V.Local.sFilter,"")
+			F.Intrinsic.Control.If(V.DataView.[V.Global.sInvConv]!dvFactorConv.RowCount,=,0)
+				V.Local.fFactConv.Set(1)
+			F.Intrinsic.Control.Else
+				V.Local.fFactConv.Set(V.DataView.[V.Global.sInvConv]!dvFactorConv(0).CONV!FieldVal)
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close(V.Global.sInvConv,"dvFactorConv")
+			'Same but for Consumption Conversion Factor
+			F.Data.DataView.Create(V.Global.sWOConv,"dvFactorConv",22,V.Local.sFilter,"")
+			F.Intrinsic.Control.If(V.DataView.[V.Global.sWOConv]!dvFactorConv.RowCount,=,0)
+				V.Local.fWOConv.Set(1)
+			F.Intrinsic.Control.Else
+				V.Local.fWOConv.Set(V.DataView.[V.Global.sWOConv]!dvFactorConv(0).CONV!FieldVal)
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close(V.Global.sWOConv,"dvFactorConv")
+			F.Intrinsic.String.Build("PART = '{0}' and LOC = '{1}'",V.Local.sPart,V.Local.sLoc,V.Local.sFilter)
+			F.Data.DataView.Create(V.Global.sPOLines,"dvPOLines",22,V.Local.sFilter,"")
+			'Loop through the WOs tied to part in BI Table and check that they have a usable
+			F.Intrinsic.Control.For(V.Local.iJobOp,V.Local.iCnt,V.Local.iPT,-1)
+				F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).WO!FieldValTrim,!=,"")
+				'Use the Qty of Job Op Hours Estimated - Hours Actual to set the PO/Inv Qty of Jobs
+					V.Local.fPOQty.Set(0)
+					V.Local.sJob.Set(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).WO!FieldValTrim)
+					V.Local.sSfx.Set(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).SUFF!FieldValTrim)
+					V.Local.sSeq.Set(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).SEQ!FieldValTrim)
+					F.Intrinsic.String.Build("JOB = '{0}' and SUFFIX = '{1}' and SEQ = '{2}'",V.Local.sJob,V.Local.sSfx,V.Local.sSeq,V.Local.sFilter)
+					F.Data.DataView.Create(V.Global.sJobOp,"dvJobOp",22,V.Local.sFilter,"")
+					F.Intrinsic.Math.Mult(V.DataView.[V.Global.sJobOp]!dvJobOp(0).QTY_REQ!FieldVal,V.Local.fWOConv,V.Local.fInvQty)
+					F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"QTY",V.Local.fInvQty)
+					F.Intrinsic.Math.Div(V.Local.fQty,V.Local.fFactConv,V.Local.fInvQty)
+					F.Intrinsic.Math.Add(V.Local.fPOQty,V.Local.fInvQty,V.Local.fPOQty)
+					F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"PO_QTY",V.Local.fInvQty)
+					F.Intrinsic.Math.Mult(V.Local.fPOQty,V.Local.fFactConv,V.Local.fInvQty)
+					'Check POs with this Part to see if they have a due date that is 3 weeks before the Job due date
+					F.Intrinsic.Control.For(V.Local.iPO,0,V.DataView.[V.Global.sPOLines]!dvPOLines.RowCount--,1)
+						V.Local.dDate.Set(V.DataView.[V.Global.sPOLines]!dvPOLines(V.Local.iPO).DATE_DUE_LINE!FieldVal)
+						V.Local.dWODate.Set(V.DataView.[V.Global.sJobOp]!dvJobOp(0).DATE_DUE!FieldVal)
+						F.Intrinsic.Date.DateDiff("d",V.Local.dDate,V.Local.dWODate,V.Local.iDays)
+						F.Intrinsic.Control.If(V.Local.iDays,>=,21)
+							F.Intrinsic.Math.Mult(V.DataView.[V.Global.sPOLines]!dvPOLines(V.Local.iPO).QTY!FieldVal,V.Local.fFactConv,V.Local.fQty)
+							F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).T_PO_QTY!FieldVal,=,0)
+								F.Intrinsic.Math.Div(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).QTY!FieldVal,V.Local.fWOConv,V.Local.fWOQty)
+							F.Intrinsic.Control.ElseIf(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).T_PO_QTY!FieldVal,=,-1)
+							'Already proved that there was enough qty in the PO's to cover this WO so exit the loop
+								F.Intrinsic.Control.ExitFor(V.Local.iPO)
+							F.Intrinsic.Control.Else
+								F.Intrinsic.Math.Div(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).T_PO_QTY!FieldVal,V.Local.fWOConv,V.Local.fWOQty)
+							F.Intrinsic.Control.EndIf
+							F.Intrinsic.Math.Sub(V.Local.fWOQty,V.Local.fQty,V.Local.fQty)
+							F.Intrinsic.Control.If(V.Local.fQty,<,0)
+								F.Intrinsic.Math.Mult(V.Local.fQty,-1,V.Local.fQty)
+								F.Intrinsic.Math.Div(V.Local.fQty,V.Local.fFactConv,V.Local.fQty)
+								F.Data.DataView.SetValue(V.Global.sPOLines,"dvPOLines",V.Local.iPO,"QTY",V.Local.fQty)
+								F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"T_PO_QTY",-1)
+							F.Intrinsic.Control.ElseIf(V.Local.fQty,=,0)
+								F.Data.DataView.SetValue(V.Global.sPOLines,"dvPOLines",V.Local.iPO,"QTY",0)
+								F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"T_PO_QTY",-1)
+							F.Intrinsic.Control.Else
+								F.Data.DataView.SetValue(V.Global.sPOLines,"dvPOLines",V.Local.iPO,"QTY",0)
+								F.Intrinsic.Math.Mult(V.Local.fQty,V.Local.fWOConv,V.Local.fQty)
+								F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"T_PO_QTY",V.Local.fQty)
+							F.Intrinsic.Control.EndIf
+						F.Intrinsic.Control.EndIf
+					F.Intrinsic.Control.Next(V.Local.iPO)
+					'Check if the T_PO_QTY value for the row is set to -1, if so, the WO Qty has been used up
+					F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).T_PO_QTY!FieldVal,=,-1)
+					'Need to delete row after subtract PO Qty from total PO qty
+						F.Intrinsic.Math.Sub(V.Local.fPOQty,V.DataTable.[V.Global.sBITable](V.Local.iJobOp).PO_QTY!FieldVal,V.Local.fPOQty)
+						F.Data.DataTable.DeleteRow(V.Global.sBITable,V.Local.iJobOp)
+						F.Intrinsic.Math.Add(V.Local.iSeqCnt,1,V.Local.iSeqCnt)
+					F.Intrinsic.Control.ElseIf(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).T_PO_QTY!FieldVal,>=,0)
+					'If not, Check the QTY OH against the value
+						F.Intrinsic.Math.Sub(V.Local.fQtyOH,V.DataTable.[V.Global.sBITable](V.Local.iJobOp).PO_QTY!FieldVal,V.Local.fQtyOH)
+						F.Intrinsic.Control.If(V.Local.fQtyOH,>,0)
+						'There's still enough Qty to cover this WO, so delete it and check the next line
+							F.Intrinsic.Math.Sub(V.Local.fPOQty,V.DataTable.[V.Global.sBITable](V.Local.iJobOp).PO_QTY!FieldVal,V.Local.fPOQty)
+							F.Data.DataTable.DeleteRow(V.Global.sBITable,V.Local.iJobOp)
+							F.Intrinsic.Math.Add(V.Local.iSeqCnt,1,V.Local.iSeqCnt)
+						F.Intrinsic.Control.Else
+						'There was not enough Qty on hand to cover the Job and it needs to remain in the report (as well as all the WOs for this part that are below this one) (set T_PO_QTY to zero so that it didn't change from the beginning)
+							F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"T_PO_QTY",0)
+						F.Intrinsic.Control.EndIf
+					F.Intrinsic.Control.EndIf
+					F.Data.DataView.Close(V.Global.sJobOp,"dvJobOp")
+				F.Intrinsic.Control.ElseIf(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).REC_TYPE!FieldValTrim,=,"PT")
+				'Take the sum of all the PO QTys written and write them to the PT line
+					F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iJobOp,"T_INV_QTY",V.Local.fInvQty,"T_PO_QTY",V.Local.fPOQty)
+				F.Intrinsic.Control.ElseIf(V.DataTable.[V.Global.sBITable](V.Local.iJobOp).REC_TYPE!FieldValTrim,=,"C1")
+					F.Intrinsic.Math.Add(V.Local.iJobOp,1,V.Local.iConv)
+					F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iConv).RowState,=,8)
+						F.Data.DataTable.DeleteRow(V.Global.sBITable,V.Local.iJobOp)
+						F.Intrinsic.Math.Add(V.Local.iSeqCnt,1,V.Local.iSeqCnt)
+					F.Intrinsic.Control.EndIf
+				F.Intrinsic.Control.EndIf
+			F.Intrinsic.Control.Next(V.Local.iJobOp)
+			F.Data.DataView.Close(V.Global.sPOLines,"dvPOLines")
+			V.Local.bGettoPT.Set(True)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iCnt).RowState,!=,8)
+		F.Intrinsic.Control.If(V.Local.iSeqCnt,>,0)
+		'Subtract Seq counter from Seq to maintain consistency in the table
+			F.Intrinsic.Math.Sub(V.DataTable.[V.Global.sBITable](V.Local.iCnt).SEQUENCE!FieldVal,V.Local.iSeqCnt,V.Local.iSeqNum)
+			F.Intrinsic.String.LPad(V.Local.iSeqNum.String,"0",9,V.Local.sSeqNum)
+			F.Data.DataTable.SetValue(V.Global.sBITable,V.Local.iCnt,"SEQUENCE",V.Local.sSeqNum)
+		F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iCnt).REC_TYPE!FieldValTrim,=,"PT")
+			'Build DV for Part. If the size is 1 or 2, delete the PT row
+			F.Intrinsic.String.Build("PART = '{0}'",V.DataTable.[V.Global.sBITable](V.Local.iCnt).PART!FieldValTrim,V.Local.sFilter)
+			F.Data.DataView.Create(V.Global.sBITable,"dvPTorBcheck",22,V.Local.sFilter,"")
+			F.Intrinsic.Control.If(V.DataView.[V.Global.sBITable]!dvPTorBcheck.RowCount,=,1)
+				F.Data.DataTable.DeleteRow(V.Global.sBITable,V.Local.iCnt)
+				F.Intrinsic.Math.Add(V.Local.iSeqCnt,1,V.Local.iSeqCnt)
+			F.Intrinsic.Control.EndIf
+			F.Data.DataView.Close(V.Global.sBITable,"dvPTorBcheck")
+			V.Local.bGettoPT.Set(False)
+		F.Intrinsic.Control.ElseIf(V.DataTable.[V.Global.sBITable](V.Local.iCnt).REC_TYPE!FieldValTrim,=,"B")
+			F.Intrinsic.Math.Add(V.Local.iCnt,1,V.Local.iConv)
+			F.Intrinsic.Control.If(V.DataTable.[V.Global.sBITable](V.Local.iConv).RowState,=,8)
+				F.Data.DataTable.DeleteRow(V.Global.sBITable,V.Local.iCnt)
+				F.Intrinsic.Math.Add(V.Local.iSeqCnt,1,V.Local.iSeqCnt)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Next(V.Local.iCnt)
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.CheckDTValues.End
+
+Program.Sub.WriteBIData.Start
+'Overwrite DT to BI DB table
+V.Local..BulkDeclareString(sError,sCurrentSubroutine,sSQL)
+F.Intrinsic.String.Build("{0}->{1}",V.Args.sOtherSubroutine,V.Ambient.CurrentSubroutine,V.Local.sCurrentSubroutine)
+F.Intrinsic.Control.Try
+
+F.Intrinsic.Control.CallSub(OpenConnection,"sOtherSubroutine",V.Local.sCurrentSubroutine)
+F.Intrinsic.String.Build("delete from BI_AUTO_PRCH_WS where TRMNL = '{0}' and RPTID = '002820';",V.Caller.Terminal,V.Local.sSQL)
+F.ODBC.Connection!con.Execute(V.Local.sSQL)
+F.Data.DataTable.SaveToDB(V.Global.sBITable,"con","BI_AUTO_PRCH_WS","",128)
+F.Intrinsic.Control.CallSub(CloseConnection,"sOtherSubroutine",V.Local.sCurrentSubroutine)
+
+'Close DTs
+F.Data.DataTable.Close(V.Global.sBITable)
+F.Data.DataTable.Close(V.Global.sInvConv)
+F.Data.DataTable.Close(V.Global.sWOConv)
+F.Data.DataTable.Close(V.Global.sPOLines)
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.WriteBIData.End
+
+Program.Sub.RunBIReport.Start
+'search for renamed standard report GCG_5144_AutoPurchWKSHT.rpt and run the report
+V.Local.sError.Declare(String)
+V.Local.sParams.Declare(String)
+V.Local.sValues.Declare(String)
+V.Local.sCompanyName.Declare(String)
+V.Local.iRPT.Declare(Long)
+F.Intrinsic.Control.Try
+
+V.Local.sParams.Set("Terminal*!*Rptid*!*Sort*!*SortSel*!*PrntWO*!*PrntSO*!*Program*!*COMPANY_NAME")
+F.Intrinsic.String.Build("{0}*!*{1}*!*{2}*!*{3}*!*{4}*!*{5}*!*{6}*!*{7}",V.Caller.Terminal,"002820","Y","3","Y","N","PURP61-002820-001",V.Ambient.CompanyName,V.Local.sValues)
+
+F.Intrinsic.String.Split(V.Local.sParams,"*!*",V.Local.sParams)
+F.Intrinsic.String.Split(V.Local.sValues,"*!*",V.Local.sValues)
+
+'Since the standard report runs at the same time as the script, need to use a custom report ID and run that after making changes to the BI table
+F.Global.BI.GetIDFromName("GCG_5144_AutoPurchWKSHT.RPT",V.Local.iRPT)
+F.Global.BI.PrintReport(V.Local.iRPT,16,V.Local.sParams,V.Local.sValues,"GSView",True)
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.RunBIReport.End
+
+Program.Sub.OpenAndEditBDF.Start
+'Open BDF table, testing for quote. Unused in 5144 as of Aug 13 2018
+'Confirmed that BDF has Post-Back
+V.Local..BulkDeclareString(sError,sCurrentSubroutine)
+F.Intrinsic.String.Build("{0}->{1}",V.Args.sOtherSubroutine,V.Ambient.CurrentSubroutine,V.Local.sCurrentSubroutine)
+V.Local.sBDF.Declare(String)
+V.Local.sWriteTo.Declare(String)
+V.Local.sPart.Declare(String)
+V.Local.sJob.Declare(String)
+V.Local.sSfx.Declare(String)
+V.Local.sSeq.Declare(String)
+V.Local.sFilter.Declare(String)
+V.Local.iRows.Declare(Long)
+V.Local.iCnt.Declare(Long)
+F.Intrinsic.Control.Try
+
+F.Intrinsic.BDF.Load("AUTO_PRCH","AUX001")
+F.Intrinsic.BDF.Clone("AUTO_PRCH","WRITETO")
+F.Intrinsic.BDF.ReadRowCount("AUTO_PRCH",V.Local.iRows)
+F.Intrinsic.Math.Sub(V.Local.iRows,1,V.Local.iRows)
+
+F.Intrinsic.Control.For(V.Local.iCnt,0,V.Local.iRows,1)
+	F.Intrinsic.BDF.ReadRow("AUTO_PRCH",0,V.Local.sBDF)
+	F.Intrinsic.String.Split(V.Local.sBDF,"|~|",V.Local.sBDF)
+	'Job - 1, Suffix - 2, Seq - 3, Part - 7
+	V.Local.sPart.Set(V.Local.sBDF(7).Trim)
+	V.Local.sJob.Set(V.Local.sBDF(1).Trim)
+	V.Local.sSfx.Set(V.Local.sBDF(2).Trim)
+	V.Local.sSeq.Set(V.Local.sSeq(3).Trim)
+	
+	F.Intrinsic.String.Build("PART = '{0}' and WO = '{1}' and SUFF = '{2}' and SEQ = '{3}'",V.Local.sPart,V.Local.sJob,V.Local.sSfx,V.Local.sSeq,V.Local.sFilter)
+	F.Data.DataView.Create(V.Global.sBITable,"dvAutoPrchCheck",22,V.Local.sFilter,"")
+	
+	F.Intrinsic.Control.If(V.DataView.[V.Global.sBITable]!dvAutoPrchCheck.RowCount,!=,0)
+	'Change Qty's and then write line to clone
+		'Purch Qty - 12, Inv Qty - 15
+		V.Local.sBDF(12).Set(V.DataView.[V.Global.sBITable]!dvAutoPrchCheck(0).PO_QTY!FieldVal)
+		V.Local.sBDF(15).Set(V.DataView.[V.Global.sBITable]!dvAutoPrchCheck(0).QTY!FieldVal)
+		
+		F.Intrinsic.String.Join(V.Local.sBDF,"|~|",V.Local.sWriteTo)
+		
+		F.Intrinsic.BDF.WriteRow("WRITETO",V.Local.sBDF)
+	F.Intrinsic.Control.EndIf
+	V.Local.sBDF.Redim(0,0)
+F.Intrinsic.Control.Next(V.Local.iCnt)
+
+'Save new BDF with removed Rows and updated values
+F.Intrinsic.BDF.Save("WRITETO","AUX001")
+
+F.Intrinsic.Control.Catch
+	F.Intrinsic.String.Build("Project: {0}{1}{1}Subroutine: {3}->{2}{1}Error Occurred {4} with description {5}{1}{1}GAB Version: {6}",V.Ambient.ScriptPath,V.Ambient.Newline,V.Ambient.CurrentSubroutine,V.Args.sOtherSubroutine,V.Ambient.ErrorNumber,V.Ambient.ErrorDescription,V.Ambient.GABVersion,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.End
+F.Intrinsic.Control.EndTry
+Program.Sub.OpenAndEditBDF.End
